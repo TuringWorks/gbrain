@@ -175,8 +175,7 @@ describe('subagent tier accepts a local model', () => {
     withTempBrainHome({});
     const written: string[] = [];
     const origWrite = process.stderr.write.bind(process.stderr);
-    // @ts-expect-error test seam
-    process.stderr.write = (s: string) => { written.push(String(s)); return true; };
+    process.stderr.write = ((s: string) => { written.push(String(s)); return true; }) as typeof process.stderr.write;
     try {
       const engine = {
         getConfig: async (k: string) => (k === 'models.tier.subagent' ? 'ollama:qwen3' : null),

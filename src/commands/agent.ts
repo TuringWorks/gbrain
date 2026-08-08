@@ -67,8 +67,8 @@ SUBMITTING
   gbrain agent run <prompt>
     --subagent-def <name>        Named plugin subagent (from GBRAIN_PLUGIN_PATH)
     --model <id>                 Model id as provider:model (default: subagent tier model,
-                                  anthropic:claude-sonnet-4-6). Non-Anthropic providers need
-                                  agent.use_gateway_loop enabled — see NOTES below.
+                                  anthropic:claude-sonnet-4-6). Non-Anthropic providers run
+                                  on the gateway loop automatically — see NOTES below.
     --max-turns <n>              Max assistant turns (default 20)
     --tools a,b,c                Subset of registered tool names (comma list)
     --timeout-ms <n>             Per-job wall-clock timeout
@@ -92,17 +92,21 @@ NOTES
   This CLI path is trusted-only. (Remote MCP callers reach subagents through
   the scoped submit_agent operation, not through this command.)
 
-  By default the worker runs the legacy Anthropic-direct path, which needs an
+  An Anthropic --model runs the legacy Anthropic-direct path, which needs an
   Anthropic key — from ANTHROPIC_API_KEY or from anthropic_api_key in
   ~/.gbrain/config.json — or the first LLM turn of a claimed job fails.
 
-  To run --model on a non-Anthropic provider, enable the provider-neutral
-  gateway loop first, then supply whatever credential that provider needs
-  (an API key for most; some recipes use OAuth or a local endpoint):
+  A non-Anthropic --model runs the provider-neutral gateway loop instead, with
+  no extra configuration: the Anthropic-direct path could not have run it. You
+  still supply whatever credential that provider needs (an API key for most;
+  local recipes like ollama and llama-server need none, just a reachable
+  endpoint).
+
+  To route ANTHROPIC models through the gateway loop as well:
     gbrain config set agent.use_gateway_loop true
   Accepted values: true / 1 / yes / on.
 
-  The gateway loop needs a provider whose recipe supports chat WITH tool
+  Either way the loop needs a provider whose recipe supports chat WITH tool
   calling — not every recipe under src/core/ai/recipes/ qualifies. A model
   that cannot call tools is refused at job start with the reason named.
 `);

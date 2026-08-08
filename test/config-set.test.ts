@@ -14,6 +14,7 @@ import { KNOWN_CONFIG_KEYS, KNOWN_CONFIG_KEY_PREFIXES, isConfigTruthy } from '..
 import { suggestNearest } from '../src/core/levenshtein.ts';
 import { runConfig } from '../src/commands/config.ts';
 import { checkSubagentCapability } from '../src/commands/doctor.ts';
+import { runAgent } from '../src/commands/agent.ts';
 import { withEnv } from './helpers/with-env.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
@@ -211,6 +212,20 @@ describe('#2753 — the doctor-proposed gateway-loop command is accepted by `con
     return { engine, setCalls };
   }
 
+  /** Capture `gbrain agent --help` output. Goes through the real `runAgent`
+   *  dispatcher rather than a new test-only export, so the text asserted here
+   *  is exactly the text a user sees. */
+  async function captureAgentHelpAsync(): Promise<string> {
+    const logs: string[] = [];
+    const logSpy = spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
+    try {
+      await runAgent({} as unknown as BrainEngine, ['--help']);
+    } finally {
+      logSpy.mockRestore();
+    }
+    return logs.join('\n');
+  }
+
   /** Run `runConfig(engine, args)`, capturing console output + exit code
    *  the way `config-get-plane.test.ts` does for the `get` subcommand. */
   async function runConfigCapture(
@@ -238,23 +253,25 @@ describe('#2753 — the doctor-proposed gateway-loop command is accepted by `con
     return { logs, errs, exit };
   }
 
-  test('doctor-proposed command round-trips through `config set` without --force', async () => {
-    const check = await withEnv(
-      { GBRAIN_HOME: home, GBRAIN_CHAT_MODEL: undefined, ANTHROPIC_API_KEY: undefined },
-      () => checkSubagentCapability(doctorStubEngine()),
-    );
-    expect(check.status).toBe('warn');
-    expect(check.message).toContain('agent.use_gateway_loop');
-
-    // Pull the exact backtick-quoted command out of the doctor message
-    // instead of hardcoding it, so the two call sites can't silently drift.
-    const match = check.message.match(/`(gbrain config set [^`]+)`/);
-    expect(match).not.toBeNull();
+  test('the command we tell users to run round-trips through `config set` without --force', async () => {
+    // The recommendation used to come from the doctor, which warned whenever
+    // chat_model was non-Anthropic without a key. That is now a SUPPORTED
+    // configuration — non-Anthropic models auto-route to the gateway loop —
+    // so the doctor no longer emits it and this test no longer sources the
+    // command from there.
+    //
+    // The #2753 invariant is unchanged and still worth guarding: the exact
+    // command string gbrain prints to users must be accepted by `config set`.
+    // `gbrain agent --help` is now the surface that prints it, so the command
+    // is extracted from there, keeping the two call sites unable to drift.
+    const helpText = await captureAgentHelpAsync();
+    const match = helpText.match(/(gbrain config set agent\.use_gateway_loop [^\s\n]+)/);
+    expect(match, 'agent --help must still document the gateway-loop key').not.toBeNull();
 
     // Tokenize the WHOLE command and feed every argument through, rather than
-    // destructuring the first two and dropping the rest. If doctor ever starts
-    // recommending a trailing `--force`, that has to fail here — the entire
-    // point of #2753 is that the recommended command works without it.
+    // destructuring the first two and dropping the rest. If the help text ever
+    // starts recommending a trailing `--force`, that has to fail here — the
+    // entire point of #2753 is that the recommended command works without it.
     const tokens = match![1].trim().split(/\s+/);
     expect(tokens.slice(0, 3)).toEqual(['gbrain', 'config', 'set']);
     expect(tokens).not.toContain('--force');
@@ -268,6 +285,20 @@ describe('#2753 — the doctor-proposed gateway-loop command is accepted by `con
     expect(errs.join('\n')).not.toContain('Nothing in gbrain reads this');
     expect(setCalls).toEqual([['agent.use_gateway_loop', 'true']]);
     expect(logs.join('\n')).toContain('Set agent.use_gateway_loop = true');
+  });
+
+  test('doctor does NOT warn about a non-Anthropic chat_model with no key', async () => {
+    // The inverse of the old assertion, pinned deliberately. A hosted
+    // non-Anthropic model auto-routes to the gateway loop, so warning here
+    // would tell the user to fix a configuration that is already correct.
+    // The stub engine has no probe-able local endpoint (chat_model is
+    // openai:gpt-5), so the check's local-reachability branch is skipped.
+    const check = await withEnv(
+      { GBRAIN_HOME: home, GBRAIN_CHAT_MODEL: undefined, ANTHROPIC_API_KEY: undefined },
+      () => checkSubagentCapability(doctorStubEngine()),
+    );
+    expect(check.status).toBe('ok');
+    expect(check.message).not.toContain('will fail at job submission');
   });
 });
 
