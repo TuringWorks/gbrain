@@ -172,6 +172,28 @@ interface PersistedToolExec {
   error: string | null;
 }
 
+/**
+ * One-shot-per-model stderr notice when a non-Anthropic model is auto-routed
+ * through the gateway loop. Not a warning — the routing is correct and there
+ * is nothing to fix. It exists so an operator reading worker logs can see
+ * WHICH loop ran without turning on debug logging, since the two paths have
+ * different cost and prompt-cache characteristics.
+ */
+const _gatewayAutoRouteNoticed = new Set<string>();
+function logGatewayAutoRoute(model: string): void {
+  if (_gatewayAutoRouteNoticed.has(model)) return;
+  _gatewayAutoRouteNoticed.add(model);
+  process.stderr.write(
+    `[subagent] "${model}" is non-Anthropic — running the provider-agnostic gateway tool loop. ` +
+    `(Set agent.use_gateway_loop=true to route Anthropic models through it as well.)\n`,
+  );
+}
+
+/** Test-only: clear the auto-route notice memo so tests can assert it re-emits. */
+export function _resetGatewayAutoRouteNoticeForTest(): void {
+  _gatewayAutoRouteNoticed.clear();
+}
+
 // ── Public handler factory ──────────────────────────────────
 
 /**
@@ -191,7 +213,16 @@ export function makeSubagentHandler(deps: SubagentDeps) {
   // new Anthropic() only reads env, so launchd/MCP workers whose key lives
   // in the gbrain config file would fail auth (#2048).
   const makeAnthropic = deps.makeAnthropic ?? (() => new Anthropic({ apiKey: resolveAnthropicKey() }));
-  const client: MessagesClient = deps.client ?? makeAnthropic().messages;
+  // LAZY, and it must stay lazy. `new Anthropic({apiKey: undefined})` throws
+  // in the SDK constructor, so building the client here — at worker
+  // REGISTRATION time — meant a brain with no Anthropic credential could not
+  // register the subagent handler at all. `gbrain jobs work` died on startup
+  // even when every job it would ever run targeted a local Ollama model
+  // through the provider-agnostic gateway loop, which never touches this
+  // client. Constructed on first legacy-path use instead; injected `deps.client`
+  // still short-circuits it for tests.
+  let _client: MessagesClient | undefined = deps.client;
+  const getClient = (): MessagesClient => (_client ??= makeAnthropic().messages);
   const config = deps.config ?? loadConfig() ?? ({ engine: 'postgres' } as GBrainConfig);
   const rateLeaseKey = deps.rateLeaseKey ?? DEFAULT_RATE_KEY;
   const maxConcurrent = deps.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
@@ -250,20 +281,29 @@ export function makeSubagentHandler(deps: SubagentDeps) {
 
     // v0.38 S1.10 — feature flag for the gateway-native tool loop. When ON,
     // route ALL subagent jobs through gateway.toolLoop() (works for every
-    // provider in src/core/ai/recipes/). When OFF, route through the legacy
-    // Anthropic-direct path AND refuse non-Anthropic models loudly.
+    // provider in src/core/ai/recipes/). When OFF, Anthropic models take the
+    // legacy Anthropic-direct path.
     const useGatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);
     // #2753: share the doctor's truthiness set. Before this, the doctor accepted
     // yes/on but the worker did not, so `config set ... yes` reported healthy
     // here and still refused the job below.
-    const useGatewayLoop = isConfigTruthy(useGatewayLoopRaw);
-    if (!useGatewayLoop && !isAnthropicProvider(model)) {
-      throw new Error(
-        `subagent job: resolved model "${model}" is non-Anthropic but agent.use_gateway_loop is not enabled. ` +
-        `Enable the gateway-native loop to run on this provider: ` +
-        `\`gbrain config set agent.use_gateway_loop true\`. ` +
-        `Or use an Anthropic model (e.g. anthropic:claude-sonnet-4-6).`,
-      );
+    const explicitGatewayLoop = isConfigTruthy(useGatewayLoopRaw);
+    // A non-Anthropic model CANNOT run the legacy path — that path calls the
+    // Anthropic Messages API directly. Through v0.42 this threw and told the
+    // user to set `agent.use_gateway_loop`, which made a working,
+    // provider-agnostic loop look like an unsupported configuration and left
+    // every local-model brain one undiscoverable config key away from
+    // functioning. The flag stays meaningful (it opts ANTHROPIC models into
+    // the gateway loop too, which is the actual rollout decision); it is just
+    // no longer the thing standing between a local model and a loop that
+    // already supports it.
+    //
+    // Safety is unchanged: classifyCapabilities() above already rejected
+    // models without tool calling and unknown providers, so auto-routing here
+    // can only reach a provider the gateway loop can actually drive.
+    const useGatewayLoop = explicitGatewayLoop || !isAnthropicProvider(model);
+    if (useGatewayLoop && !explicitGatewayLoop) {
+      logGatewayAutoRoute(model);
     }
 
     // Build the tool registry bound to THIS job as the owning subagent.
@@ -593,7 +633,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
         };
 
         const combinedSignal = mergeSignals(ctx.signal, ctx.shutdownSignal);
-        assistantMsg = await client.create(params, { signal: combinedSignal });
+        assistantMsg = await getClient().create(params, { signal: combinedSignal });
       } catch (err) {
         // Release lease eagerly on error so we don't starve capacity.
         await releaseLease(engine, lease.leaseId!).catch(() => {});
