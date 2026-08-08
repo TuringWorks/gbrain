@@ -36,8 +36,15 @@ export async function probeOpenAICompat(baseUrl: string, timeoutMs: number = 100
   }
 }
 
-export async function probeOllama(): Promise<ProbeResult> {
-  const url = process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434/v1';
+/**
+ * Probe an Ollama daemon's OpenAI-compatible endpoint. Defaults to the local
+ * daemon on 11434. Pass `baseURL` (from `cfg.base_urls['ollama']`) so the
+ * probe checks the same endpoint the gateway will call — a config-only URL
+ * override would otherwise be invisible here (the codex-#5 class fixed for
+ * llama-server).
+ */
+export async function probeOllama(baseURL?: string): Promise<ProbeResult> {
+  const url = baseURL ?? process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434/v1';
   return probeOpenAICompat(url);
 }
 

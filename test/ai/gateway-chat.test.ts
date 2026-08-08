@@ -60,9 +60,25 @@ describe('chat touchpoint — recipe registry', () => {
     }
   });
 
-  test('embedding-only providers (voyage, ollama) do NOT declare chat', () => {
+  test('embedding-only providers (voyage) do NOT declare chat', () => {
     expect(getRecipe('voyage')!.touchpoints.chat).toBeUndefined();
-    expect(getRecipe('ollama')!.touchpoints.chat).toBeUndefined();
+  });
+
+  test('local providers declare chat so a keyless brain can run end-to-end', () => {
+    // Ollama and llama-server were embedding-only through v0.42, which meant
+    // a local install could index a brain but never `think` over it — the
+    // synthesis step always needed a hosted key. Both now declare chat with
+    // tool calling, which is what makes the no-hosted-key path real.
+    for (const id of ['ollama', 'llama-server']) {
+      const chat = getRecipe(id)!.touchpoints.chat;
+      expect(chat, `${id} must declare a chat touchpoint`).toBeDefined();
+      expect(chat!.supports_tools, `${id} chat must support tools`).toBe(true);
+      expect(chat!.supports_subagent_loop).toBe(true);
+      // Local inference is free at the margin; a nonzero cost here would
+      // corrupt every --max-usd pre-flight for local brains.
+      expect(chat!.cost_per_1m_input_usd).toBe(0);
+      expect(chat!.cost_per_1m_output_usd).toBe(0);
+    }
   });
 
   test('openai-compat chat recipes have base_url_default', () => {
@@ -172,8 +188,23 @@ describe('chat touchpoint — model resolver + aliases (Codex F-OV-5)', () => {
   test('assertTouchpoint rejects chat on embedding-only providers with a fix hint', () => {
     expect(() => assertTouchpoint(getRecipe('voyage')!, 'chat', 'voyage-3'))
       .toThrow(AIConfigError);
-    expect(() => assertTouchpoint(getRecipe('ollama')!, 'chat', 'nomic-embed-text'))
-      .toThrow(AIConfigError);
+    // The hint points at the local lane first — a user who hit this wall is
+    // usually trying to avoid a hosted key, not shopping for a hosted one.
+    try {
+      assertTouchpoint(getRecipe('voyage')!, 'chat', 'voyage-3');
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect((e as AIConfigError).fix ?? '').toContain('ollama');
+    }
+  });
+
+  test('assertTouchpoint accepts chat on local providers (arbitrary model ids)', () => {
+    // openai-compat tier: the model list is advisory, so any model the user
+    // has actually pulled/launched resolves. Rejection surfaces at the
+    // provider, not in gbrain.
+    expect(() => assertTouchpoint(getRecipe('ollama')!, 'chat', 'qwen3')).not.toThrow();
+    expect(() => assertTouchpoint(getRecipe('ollama')!, 'chat', 'some-model-i-pulled')).not.toThrow();
+    expect(() => assertTouchpoint(getRecipe('llama-server')!, 'chat', 'local-gguf')).not.toThrow();
   });
 
   test('assertTouchpoint rejects unknown native model with the model list in the fix hint', () => {
