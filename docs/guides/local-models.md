@@ -156,6 +156,24 @@ drift.
 Fireworks is the only one of the four new providers that can serve a whole
 brain alone; the other three ship no embedding model and need to be paired.
 
+### Providers deliberately not added
+
+Three more were considered and left out, because each needs transport work
+rather than a recipe — a recipe is pure data over an OpenAI-compatible
+endpoint, and these are not that:
+
+- **AWS Bedrock** — requests are SigV4-signed against a regional host. That is
+  a new `implementation` in the gateway's factory switch, not a `base_url`.
+- **GitHub Copilot** — auth is an OAuth device flow with short-lived tokens, so
+  there is no static key for `auth_env` to name.
+- **poolside** — access is enterprise-gated; the endpoint contract could not be
+  verified against public documentation, and shipping an unverifiable recipe
+  is how stale model ids and wrong prices get in.
+
+All three are reachable today through the `litellm` recipe, which is the
+existing escape hatch for exactly this: run LiteLLM in front of them and point
+gbrain at the proxy.
+
 ### A note on cost estimates
 
 `cerebras`, `fireworks`, and `sambanova` do not publish stable per-1M-token
