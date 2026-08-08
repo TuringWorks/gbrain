@@ -158,7 +158,45 @@ describe('resolveTierDefault — the step-7 fallback', () => {
   });
 });
 
-// ── 3. the new hosted providers ─────────────────────────────────────────────
+// ── 3. a local model survives the subagent tier gate ────────────────────────
+
+describe('subagent tier accepts a local model', () => {
+  test('resolveModel does not fall back to Anthropic for a local subagent model', async () => {
+    withTempBrainHome({});
+    const engine = {
+      getConfig: async (k: string) => (k === 'models.tier.subagent' ? 'ollama:qwen3' : null),
+    } as never;
+    const { resolveModel } = await import('../../src/core/model-config.ts');
+    const got = await resolveModel(engine, { tier: 'subagent', fallback: 'anthropic:claude-sonnet-4-6' });
+    expect(got).toBe('ollama:qwen3');
+  });
+
+  test('the no-caching notice does not tell a free provider that Anthropic is cheaper', async () => {
+    withTempBrainHome({});
+    const written: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    // @ts-expect-error test seam
+    process.stderr.write = (s: string) => { written.push(String(s)); return true; };
+    try {
+      const engine = {
+        getConfig: async (k: string) => (k === 'models.tier.subagent' ? 'ollama:qwen3' : null),
+      } as never;
+      const { resolveModel } = await import('../../src/core/model-config.ts');
+      await resolveModel(engine, { tier: 'subagent', fallback: 'anthropic:claude-sonnet-4-6' });
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    const notice = written.join('');
+    expect(notice).toContain('prompt caching');
+    // Local inference is free at the margin — a cost warning is simply wrong,
+    // and it is what a deliberately-local brain would see on every process.
+    expect(notice).not.toContain('For lower cost');
+    expect(notice).not.toContain('cost scales linearly');
+    expect(notice).toContain('slower');
+  });
+});
+
+// ── 4. the new hosted providers ─────────────────────────────────────────────
 
 describe('vibecody provider delta — xai / cerebras / fireworks / sambanova', () => {
   const NEW_IDS = ['xai', 'cerebras', 'fireworks', 'sambanova'];

@@ -173,6 +173,24 @@ export function isAnthropicProvider(modelString: string): boolean {
 
 const _subagentTierWarningsEmitted = new Set<string>();
 
+/**
+ * True when the resolved model runs on hardware the user already owns, so its
+ * marginal token cost is zero. Read from the recipe's declared chat pricing
+ * rather than an id allowlist, so a future local recipe is covered without
+ * editing this list.
+ */
+function isFreeLocalProvider(resolved: string): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mr = require('./ai/model-resolver.ts') as typeof import('./ai/model-resolver.ts');
+    const { recipe } = mr.resolveRecipe(resolved);
+    const chat = recipe.touchpoints.chat;
+    return chat?.cost_per_1m_input_usd === 0 && chat?.cost_per_1m_output_usd === 0;
+  } catch {
+    return false;
+  }
+}
+
 // Module-level set of deprecated config keys we've already warned about.
 // Reset on process restart; one warning per (key, process) per Codex P1 #11.
 const _deprecationWarningsEmitted = new Set<string>();
@@ -343,10 +361,18 @@ function enforceSubagentCapable(resolved: string, tier: ModelTier | undefined, s
   if (verdict === 'degraded:no_caching') {
     if (!_subagentTierWarningsEmitted.has(key)) {
       _subagentTierWarningsEmitted.add(key);
+      // A free provider pays for the missing cache in latency, not dollars.
+      // Telling someone running Ollama that their loop is expensive — and
+      // that Anthropic would be cheaper — is simply wrong, and it is the
+      // message a deliberately-local brain would see on every process.
+      const free = isFreeLocalProvider(resolved);
       process.stderr.write(
         `[models] tier.subagent resolved to "${resolved}" via "${source}" — provider does not support prompt caching. ` +
-        `The loop will run hot (cost scales linearly with conversation length). ` +
-        `For lower cost on long loops, set models.tier.subagent to an Anthropic model.\n`,
+        (free
+          ? `The loop re-sends the whole conversation each turn, so long loops get progressively slower. ` +
+            `Raise the model's context window if turns start truncating.\n`
+          : `The loop will run hot (cost scales linearly with conversation length). ` +
+            `For lower cost on long loops, set models.tier.subagent to an Anthropic model.\n`),
       );
     }
   }
