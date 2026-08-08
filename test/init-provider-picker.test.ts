@@ -14,16 +14,36 @@ import {
 } from '../src/commands/init-provider-picker.ts';
 
 describe('printSubagentAnthropicCaveat', () => {
-  test('writes the canonical D7 caveat lines', () => {
+  test('names the subagent surfaces the user is about to run on this provider', () => {
     let buf = '';
     printSubagentAnthropicCaveat((s) => { buf += s; });
     expect(buf).toContain('subagent features');
     expect(buf).toContain('gbrain dream');
     expect(buf).toContain('gbrain agent run');
     expect(buf).toContain('gbrain autopilot');
-    expect(buf).toContain('ANTHROPIC_API_KEY');
-    // The caveat must clarify chat alone is fine without it.
-    expect(buf).toContain('Chat alone');
+  });
+
+  test('does NOT claim subagent features require an Anthropic key', () => {
+    // This message used to say they "require ANTHROPIC_API_KEY regardless of
+    // which chat model you pick". That stopped being true when the subagent
+    // handler began auto-routing non-Anthropic models through the
+    // provider-agnostic tool loop — and it is shown to a user at the exact
+    // moment they deliberately chose a non-Anthropic provider, so a stale
+    // claim here tells them their choice doesn't count.
+    let buf = '';
+    printSubagentAnthropicCaveat((s) => { buf += s; });
+    expect(buf).not.toContain('require ANTHROPIC_API_KEY');
+    expect(buf).toContain('no\n      ANTHROPIC_API_KEY needed');
+  });
+
+  test('states the two things that DO differ on a non-Anthropic provider', () => {
+    // Tool-calling quality and the absence of prompt caching are the real
+    // trade-offs. Dropping them would make the note pure reassurance.
+    let buf = '';
+    printSubagentAnthropicCaveat((s) => { buf += s; });
+    expect(buf).toContain('tool calling');
+    expect(buf).toContain('prompt caching');
+    expect(buf).toContain('gbrain doctor');
   });
 });
 

@@ -488,7 +488,11 @@ export async function runThink(
         question: opts.question,
         answer: modelProblem
           ? `(model "${modelUsed}" not usable — ${detail}${fix})`
-          : '(no LLM available — set ANTHROPIC_API_KEY or pass `client`)',
+          // The warning CODE stays NO_ANTHROPIC_API_KEY for back-compat (it is
+          // a stable machine-readable signal), but the prose must not imply
+          // Anthropic is the only option — any chat-capable provider works,
+          // including a local one with no key at all.
+          : '(no LLM available — configure a chat model: `gbrain config set chat_model ollama:qwen3` for local, or set a hosted key such as ANTHROPIC_API_KEY / OPENAI_API_KEY)',
         citations: [],
         gaps: [
           modelProblem
@@ -833,7 +837,7 @@ function buildGracefulMessage(modelStr: string): {
     type: 'message',
     role: 'assistant',
     model: modelStr,
-    content: [{ type: 'text', text: '(no LLM available — set anthropic_api_key via gbrain config or ANTHROPIC_API_KEY env)' }],
+    content: [{ type: 'text', text: '(no LLM available — set a chat model via `gbrain config set chat_model <provider>:<model>`, or provide that provider\'s key via gbrain config / env)' }],
     usage: { input_tokens: 0, output_tokens: 0 },
     stop_reason: 'end_turn',
   };
