@@ -16,6 +16,8 @@ Remote Ollama and Ollama Cloud work through the same recipe via `OLLAMA_BASE_URL
 
 Four hosted providers join the registry: xAI (Grok), Cerebras, Fireworks AI, and SambaNova. Fireworks serves embeddings as well as chat; the other three are chat-only and pair with an embedding provider.
 
+**`gbrain models autotune` gives each model tier a model sized for its job.** gbrain routes work through four tiers — classification, the default workhorse, expensive reasoning, and the tool loop. A keyless brain used to run all four on one model, which wastes a local fleet in both directions. autotune reads what you have pulled and assigns each tier, printing its reasoning and the context window it measured. It runs automatically during `gbrain init` when you pick an Ollama chat model, never overwrites a tier you set by hand, and is safe to re-run after pulling a model. Discovery happens once and writes config, so model resolution stays a pure config read with no network call in the path.
+
 ### To take advantage of this release
 
 ```bash

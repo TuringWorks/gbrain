@@ -61,6 +61,74 @@ worth knowing about because each one is a place the behavior could regress:
    missing key — so `gbrain jobs work` died at startup on a keyless brain
    before any routing decision was reached.
 
+## Giving each tier the right model
+
+gbrain routes work through four model tiers — `utility` (classification,
+verdicts), `reasoning` (the default workhorse), `deep` (expensive reasoning),
+and `subagent` (the tool loop). With no per-tier config, a keyless brain runs
+all four on your `chat_model`, which wastes the fleet in both directions: a 3B
+model is the right classifier and the wrong deep reasoner.
+
+`gbrain models autotune` reads what you have pulled and assigns each tier:
+
+```
+$ gbrain models autotune
+Local fleet at http://localhost:11434/v1: 14 model(s), 7 tool-capable.
+
+  ✔ utility    ollama:llama3.2:latest      128k ctx  2.0GB, smallest tool-capable without thinking
+  ✔ reasoning  ollama:gpt-oss:20b          128k ctx  13.8GB, runner-up by size
+  ✔ deep       ollama:qwen3.6:35b-mlx      128k ctx  21.9GB, largest tool-capable
+  ✔ subagent   ollama:gpt-oss:20b          128k ctx  13.8GB, same workhorse
+```
+
+It runs automatically during `gbrain init` when you pick an Ollama chat model,
+so a fresh local brain is tiered without a second command. Re-run it after
+pulling a new model. `--dry-run` previews; `--json` is machine-readable.
+
+**It never overwrites a tier you set by hand.** A hand-tuned tier is a
+decision, so re-running after a pull is safe. Use `--force` to overwrite.
+
+**Discovery runs once and writes config.** Model resolution stays a pure config
+read — putting a probe in the resolution path would add a network round-trip to
+every unconfigured call, which is worse than the flat defaults it fixes.
+
+### What the ranking is, and is not
+
+Ranking is by on-disk size, which is a proxy for capability, not a quality
+measure — a 9B model tuned for reasoning may well beat a 12B generalist. That's
+why every assignment is printed with its justification and stays overridable:
+
+```bash
+gbrain config set models.tier.deep ollama:your-preferred-model
+```
+
+Size specifically means *bytes*, not parameter count: quantized and MLX builds
+frequently report no parameter count at all, so a parameter-based sort silently
+drops them to the bottom of the fleet.
+
+Two tier rules are deliberate. `utility` prefers the smallest model **without**
+a `thinking` capability — classification returns a label, and reasoning tokens
+spent on it are pure overhead. `reasoning` takes the runner-up rather than the
+largest, so deep-tier latency isn't paid on every ordinary call.
+
+### Why capability detection matters more than it sounds
+
+Ollama reports per-model capabilities, and several **embedding** models
+advertise `tools` while lacking `completion` — `qwen3-embedding:8b` reports
+`[tools,embedding]`. At 7.6B it outranks most genuine chat models by size, so
+selecting on `tools` alone lands a model that cannot generate text into a
+reasoning tier. autotune requires `completion` **and** `tools`, and prints
+every rejected model with the reason:
+
+```
+  Not eligible for chat tiers:
+    - qwen3-embedding:8b    embedding model (advertises tools but has no completion)
+```
+
+`llama-server` and `litellm` are not autotuned: the former serves one model
+chosen at launch, and the latter proxies opaque backends with no capability
+API. Both keep the single-model behavior.
+
 ## What you give up
 
 Be clear-eyed about this. Local is not free of cost, it just moves the cost.
@@ -73,8 +141,8 @@ as latency — a 20-turn loop re-processes a growing prompt 20 times.
 
 **Context window.** The `ollama` and `llama-server` recipes declare a
 conservative 4096-token context, because that is the un-tuned default for both.
-That is *small* — smaller than a single `tokenmax` search payload. If you have
-raised it, raise gbrain's budget to match:
+That is *small* — smaller than a single `tokenmax` search payload. Raise the
+daemon, then raise gbrain's budget to match:
 
 ```bash
 # Ollama: raise the daemon's default, then tell gbrain about it.
@@ -84,7 +152,15 @@ gbrain config set search.token_budget 12000
 
 Leaving these mismatched is the most common way a local setup produces
 plausible-but-truncated answers: the daemon silently drops the front of the
-prompt, which is where the retrieved context lives.
+prompt, which is where the retrieved context lives — no error is raised
+anywhere.
+
+`gbrain models autotune` reports the context it measured per tier, so you can
+see the real number rather than the recipe's conservative default. It reads the
+length the daemon actually **serves** (which is `min(trained length, OLLAMA_CONTEXT_LENGTH)`),
+not what the model was trained for — those differ by 32× on an un-tuned daemon,
+and only the served value predicts truncation. The reading requires a chat
+model to be resident, so run one query first if autotune reports it as unknown.
 
 **Tool-calling quality.** Declaring `supports_tools: true` on the recipe says
 the *server* speaks the protocol, not that your model uses it well. Small

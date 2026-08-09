@@ -646,13 +646,20 @@ export async function runModels(engine: BrainEngine, args: string[]): Promise<vo
   // to the args.includes('--help') branch; the args[0] rewrite needs
   // explicit ordering to preserve that behavior.
   const hasHelp = args.includes('--help') || args.includes('-h') || args[0] === 'help';
-  const sub = hasHelp ? 'help' : args[0] === 'doctor' ? 'doctor' : 'read';
+  const sub = hasHelp
+    ? 'help'
+    : args[0] === 'doctor'
+      ? 'doctor'
+      : args[0] === 'autotune'
+        ? 'autotune'
+        : 'read';
 
   if (sub === 'help') {
     process.stdout.write(
 `Usage:
   gbrain models                   Show routing table (read-only)
   gbrain models doctor [flags]    Probe each configured model (~1 token each)
+  gbrain models autotune [flags]  Assign tiers from your local Ollama fleet
   gbrain models --json            Machine-readable output
 
 Flags (doctor only):
@@ -660,13 +667,31 @@ Flags (doctor only):
                                   Repeatable: --skip=openai --skip=google
   --json                          JSON output
 
+Flags (autotune only):
+  --dry-run                       Show the proposed mapping, write nothing
+  --force                         Overwrite tiers you already set by hand
+  --json                          JSON output
+
 Configure routing:
   gbrain config set models.default <model>           # global hammer
   gbrain config set models.tier.<tier> <model>       # per-tier (utility/reasoning/deep/subagent)
   gbrain config set models.aliases.<name> <model>    # custom alias
 
-Tiers: utility (haiku-class) | reasoning (sonnet) | deep (opus) | subagent (Anthropic-only)
+Tiers: utility (classification) | reasoning (default workhorse) | deep (expensive
+reasoning) | subagent (tool loop). Without per-tier config, a brain with an
+Anthropic key uses the Anthropic defaults; a keyless brain falls back to its
+configured chat_model for every tier — which \`autotune\` improves on by giving
+each tier a model sized for its job.
 `);
+    return;
+  }
+
+  if (sub === 'autotune') {
+    await runModelsAutotune(engine, {
+      json,
+      dryRun: args.includes('--dry-run'),
+      force: args.includes('--force'),
+    });
     return;
   }
 
@@ -753,4 +778,146 @@ Tiers: utility (haiku-class) | reasoning (sonnet) | deep (opus) | subagent (Anth
   if (report.summary.failed > 0) {
     process.exit(1);
   }
+}
+
+// ── autotune ────────────────────────────────────────────────────────────────
+
+const AUTOTUNE_TIERS = ['utility', 'reasoning', 'deep', 'subagent'] as const;
+
+/**
+ * Assign the four model tiers from the local Ollama fleet.
+ *
+ * Runs discovery ONCE and persists the result to `models.tier.*`. Model
+ * resolution deliberately stays a pure config read — putting this probe in
+ * the resolution path would add a network round-trip to every unconfigured
+ * LLM call, which is a worse problem than the flat defaults it fixes.
+ *
+ * Existing per-tier settings are preserved unless `--force`: a hand-tuned tier
+ * is a decision, and silently overwriting it on a re-run would make the
+ * command unsafe to repeat after pulling a model.
+ */
+export async function runModelsAutotune(
+  engine: BrainEngine,
+  opts: {
+    json?: boolean;
+    dryRun?: boolean;
+    force?: boolean;
+    /**
+     * Exit the process on a discovery failure. True for the CLI, where a
+     * non-zero code is the contract. MUST be false for in-process callers:
+     * `gbrain init` invokes this as an optimization, and an unreachable
+     * daemon at install time — the normal case, since people configure
+     * before starting `ollama serve` — would otherwise abort the whole init.
+     */
+    exitOnError?: boolean;
+  } = {},
+): Promise<void> {
+  const exitOnError = opts.exitOnError !== false;
+  const {
+    discoverOllamaModels, rankForTiers, observeServedContext, effectiveContext,
+  } = await import('../core/ai/local-discovery.ts');
+  const { loadConfig } = await import('../core/config.ts');
+  const { getRecipe } = await import('../core/ai/recipes/index.ts');
+
+  const cfg = loadConfig();
+  const baseURL = cfg?.provider_base_urls?.ollama
+    ?? process.env.OLLAMA_BASE_URL
+    ?? getRecipe('ollama')?.base_url_default
+    ?? 'http://localhost:11434/v1';
+
+  let models;
+  try {
+    models = await discoverOllamaModels(baseURL);
+  } catch (e) {
+    const msg = `Ollama not reachable at ${baseURL}: ${e instanceof Error ? e.message : String(e)}`;
+    if (opts.json) process.stdout.write(JSON.stringify({ status: 'error', message: msg }, null, 2) + '\n');
+    else process.stderr.write(`${msg}\nStart it with \`ollama serve\`, or set OLLAMA_BASE_URL.\n`);
+    if (exitOnError) process.exit(1);
+    return;
+  }
+
+  const assignment = rankForTiers(models);
+  if (!assignment) {
+    // Every model rejected. Naming why beats "no models found" — the usual
+    // cause is a fleet of embedding-only models, which looks non-empty.
+    const msg = models.length === 0
+      ? `No models pulled. Try \`ollama pull qwen3\`.`
+      : `No tool-calling chat model among ${models.length} pulled model(s). The subagent loop dispatches brain ops via tool calls, so a model without tool support cannot drive it. Try \`ollama pull qwen3\`.`;
+    if (opts.json) process.stdout.write(JSON.stringify({ status: 'error', message: msg, models }, null, 2) + '\n');
+    else process.stderr.write(`${msg}\n`);
+    if (exitOnError) process.exit(1);
+    return;
+  }
+
+  const served = await observeServedContext(baseURL, { models });
+  const existing: Record<string, string | null> = {};
+  for (const t of AUTOTUNE_TIERS) {
+    existing[t] = await engine.getConfig(`models.tier.${t}`).catch(() => null);
+  }
+
+  const plan = AUTOTUNE_TIERS.map(tier => {
+    const model = assignment.tiers[tier];
+    const info = models.find(m => `ollama:${m.name}` === model);
+    const held = existing[tier];
+    const skipped = Boolean(held && held.trim() && !opts.force);
+    return {
+      tier,
+      model,
+      reason: assignment.reasons[tier],
+      context: info ? effectiveContext(info, served.servedContext) : undefined,
+      existing: held ?? null,
+      applied: !skipped && !opts.dryRun,
+      skipped_reason: skipped ? `already set to "${held}" — pass --force to overwrite` : undefined,
+    };
+  });
+
+  if (!opts.dryRun) {
+    for (const p of plan) {
+      if (p.applied) await engine.setConfig(`models.tier.${p.tier}`, p.model);
+    }
+  }
+
+  if (opts.json) {
+    process.stdout.write(JSON.stringify({
+      status: 'ok',
+      base_url: baseURL,
+      dry_run: Boolean(opts.dryRun),
+      served_context: served.servedContext ?? null,
+      served_context_definitive: served.definitive,
+      served_context_observed_from: served.observedFrom ?? null,
+      tiers: plan,
+      rejected: assignment.rejected,
+    }, null, 2) + '\n');
+    return;
+  }
+
+  const out = process.stdout;
+  out.write(`Local fleet at ${baseURL}: ${models.length} model(s), ${models.filter(m => m.chatCapable).length} tool-capable.\n\n`);
+  for (const p of plan) {
+    const mark = p.applied ? '✔' : p.skipped_reason ? '–' : ' ';
+    const ctx = p.context ? `${Math.round(p.context / 1024)}k ctx` : 'ctx unknown';
+    out.write(`  ${mark} ${p.tier.padEnd(10)} ${p.model.padEnd(28)} ${ctx.padStart(11)}  ${p.reason}\n`);
+    if (p.skipped_reason) out.write(`    ${' '.repeat(10)} kept: ${p.skipped_reason}\n`);
+  }
+  if (assignment.rejected.length > 0) {
+    out.write(`\n  Not eligible for chat tiers:\n`);
+    for (const r of assignment.rejected) out.write(`    - ${r.name.padEnd(32)} ${r.reason}\n`);
+  }
+  if (served.servedContext !== undefined) {
+    out.write(
+      served.definitive
+        ? `\n  Daemon serves at most ${served.servedContext} tokens (measured on ${served.observedFrom}); ` +
+          `contexts above are clamped to it.\n`
+        : `\n  Daemon served ${served.servedContext} tokens to ${served.observedFrom}, which is a FLOOR, not the cap ` +
+          `(that model got its full trained length). Contexts are clamped to it — safe, possibly pessimistic. ` +
+          `Raise with OLLAMA_CONTEXT_LENGTH.\n`,
+    );
+  } else {
+    out.write(`\n  No chat model resident, so the daemon's served context is unknown and trained lengths are shown ` +
+      `unclamped. An un-tuned daemon serves 4096 regardless of what a model was trained for — run one query, then ` +
+      `re-run autotune for a measured reading.\n`);
+  }
+  out.write(opts.dryRun
+    ? `\n  Dry run — nothing written. Re-run without --dry-run to apply.\n`
+    : `\n  Wrote ${plan.filter(p => p.applied).length} tier(s). Override any with: gbrain config set models.tier.<tier> <model>\n`);
 }
