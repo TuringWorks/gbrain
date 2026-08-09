@@ -3125,33 +3125,45 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
       const issue = explain(tierSubagent, resolvedSource);
       if (issue) return issue;
     }
-    // v0.37 (T10 / D7) + v0.38 (D7 capability rename): warn when the configured
-    // chat_model is non-Anthropic AND ANTHROPIC_API_KEY isn't set. With
-    // agent.use_gateway_loop=false (the v0.38 default), subagent jobs still
-    // require Anthropic at runtime; without the key, gbrain dream / gbrain
-    // agent run / gbrain autopilot will all fail at job submission. Catches
-    // the post-init drift case the init-time caveat would have shown if init
-    // had been re-run.
+    // A non-Anthropic subagent model is now a supported configuration, not a
+    // warning: the handler auto-routes it through the provider-agnostic
+    // gateway tool loop. What IS still worth reporting is the local-provider
+    // readiness question the old check never asked — a brain pointed at
+    // Ollama with the daemon stopped is broken in a way no key check catches.
     try {
       const { loadConfig } = await import('../core/config.ts');
       const cfg = loadConfig();
       const chatModel = cfg?.chat_model;
-      const { isConfigTruthy } = await import('../core/config.ts');
-      const gatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);
-      const gatewayLoopEnabled = isConfigTruthy(gatewayLoopRaw);
       const { isAnthropicProvider } = await import('../core/model-config.ts');
-      if (chatModel && !isAnthropicProvider(chatModel) && !process.env.ANTHROPIC_API_KEY && !gatewayLoopEnabled) {
-        return {
-          name: 'subagent_capability',
-          status: 'warn',
-          message:
-            `chat_model is "${chatModel}" (non-Anthropic) and ANTHROPIC_API_KEY is not set. ` +
-            `Subagent features (gbrain dream, gbrain agent run, gbrain autopilot) will fail at job submission ` +
-            `unless agent.use_gateway_loop=true. Chat alone (gbrain think) still works. ` +
-            `Either set ANTHROPIC_API_KEY or enable: \`gbrain config set agent.use_gateway_loop true\`.`,
-        };
+      if (chatModel && !isAnthropicProvider(chatModel)) {
+        const { resolveRecipe } = await import('../core/ai/model-resolver.ts');
+        const { recipe } = resolveRecipe(chatModel);
+        // Only local-server recipes carry a probe. Hosted providers surface
+        // auth/availability at call time with a clear provider error.
+        if (recipe.probe) {
+          // `provider_base_urls` is the config-file field; the gateway merges
+          // it over the `*_BASE_URL` env vars into its own `base_urls`. Pass
+          // the same resolved URL the gateway would use, else the probe checks
+          // localhost while live traffic goes to a remote daemon.
+          const baseURL = cfg?.provider_base_urls?.[recipe.id];
+          const verdict = await Promise.race([
+            recipe.probe(baseURL),
+            new Promise<{ ready: boolean; hint?: string }>(resolve =>
+              setTimeout(() => resolve({ ready: false, hint: 'probe timed out after 2s' }), 2000)),
+          ]).catch(() => ({ ready: false, hint: 'probe threw' }));
+          if (!verdict.ready) {
+            return {
+              name: 'subagent_capability',
+              status: 'warn',
+              message:
+                `chat_model is "${chatModel}" but its endpoint is not reachable. ` +
+                `${verdict.hint ?? ''} ` +
+                `Subagent features (gbrain dream, gbrain agent run, gbrain autopilot) will fail until it is.`,
+            };
+          }
+        }
       }
-    } catch { /* loadConfig may throw; fall through */ }
+    } catch { /* loadConfig / resolveRecipe may throw; fall through to ok */ }
 
     return {
       name: 'subagent_capability',

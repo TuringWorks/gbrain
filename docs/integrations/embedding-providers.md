@@ -4,6 +4,12 @@ GBrain ships with 16 embedding-provider recipes covering OpenAI, ZeroEntropy, Vo
 
 This page is the human-readable counterpart: capability per provider, env-var setup, dimensions, cost, and known constraints.
 
+> **Embeddings are one touchpoint of four.** A provider that embeds does not
+> necessarily chat, and vice versa. If you are trying to run a brain with no
+> hosted API key at all, read **[Running gbrain on local models](../guides/local-models.md)**
+> — it covers the chat / expansion / subagent side, which is where the hosted
+> dependency actually used to live.
+
 ## Quick start
 
 ```
@@ -34,6 +40,7 @@ The resolved provider + dimensions get persisted to `~/.gbrain/config.json` atom
 | `zhipu` | `ZHIPUAI_API_KEY` | 1024 | varies | no | no |
 | `ollama` | (none — runs locally) | 768 | 0 | yes | no |
 | `llama-server` | (none — runs locally) | user-set | 0 | yes | no |
+| `fireworks` | `FIREWORKS_API_KEY` | 768 (Matryoshka to 512/256/128/64) | varies | no | no |
 | `litellm` | `LITELLM_API_KEY` (optional) | user-set | varies | yes (proxy) | yes (backend permitting) |
 | `together` | `TOGETHER_API_KEY` | 768 | varies | no | no |
 | `anthropic` | (no embedding model — chat only) | — | — | — | — |

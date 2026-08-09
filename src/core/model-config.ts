@@ -78,6 +78,73 @@ export const TIER_DEFAULTS: Record<ModelTier, string> = {
   subagent:  'anthropic:claude-sonnet-4-6',
 };
 
+const _tierFallbackNoticesEmitted = new Set<string>();
+
+/**
+ * Last-resort tier default, consulted only when NOTHING in the resolution
+ * chain matched (no CLI flag, no `models.*` config, no env var).
+ *
+ * Why this exists: `TIER_DEFAULTS` is Anthropic across the board. For a brain
+ * with an Anthropic credential that is the right answer and this function is a
+ * pass-through — historical behavior, byte for byte. For a brain deliberately
+ * run without one (local Ollama / llama-server, or a hosted non-Anthropic
+ * provider), an `anthropic:*` default is not a default at all: it is a
+ * guaranteed failure that reports itself as `NO_ANTHROPIC_API_KEY`, which
+ * reads as "gbrain requires Anthropic" rather than "nothing told me what to
+ * use". Users hit this after correctly pointing `chat_model` at Ollama,
+ * because the gateway's `chat_model` and this tier resolver were two
+ * independent notions of "the default model" and only one of them was
+ * consulted here.
+ *
+ * So: when no Anthropic credential resolves, prefer the brain's configured
+ * `chat_model` — the value `gbrain init` already wrote when the user picked a
+ * provider. Falling back to `TIER_DEFAULTS` when that is absent too is
+ * deliberate: the resulting error names the missing key honestly, which is the
+ * correct outcome for someone who simply hasn't finished setup.
+ *
+ * Deliberately NOT a probe. This runs during model resolution; reaching out to
+ * a local daemon here would put a network round-trip in the path of every
+ * unconfigured call. Readiness is the doctor's job.
+ */
+export function resolveTierDefault(tier: ModelTier): string {
+  const anthropicDefault = TIER_DEFAULTS[tier];
+  let hasKey = true;
+  let configuredChat: string | undefined;
+  try {
+    // Lazy require for the same cycle-safety reason as capabilities.ts below:
+    // anthropic-key → config, and config is imported broadly.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const keys = require('./ai/anthropic-key.ts') as typeof import('./ai/anthropic-key.ts');
+    hasKey = keys.hasAnthropicKey();
+    if (!hasKey) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const cfgMod = require('./config.ts') as typeof import('./config.ts');
+      const cfg = cfgMod.loadConfig();
+      const chat = cfg?.chat_model;
+      if (chat && chat.trim()) configuredChat = chat.trim();
+    }
+  } catch {
+    // Config unreadable (first-run install) — keep the historical default.
+    return anthropicDefault;
+  }
+
+  if (hasKey || !configuredChat) return anthropicDefault;
+  // An anthropic:* chat_model with no key is the same dead end as the tier
+  // default; don't dress it up as a substitution.
+  if (isAnthropicProvider(configuredChat)) return anthropicDefault;
+
+  const key = `${tier}:${configuredChat}`;
+  if (!_tierFallbackNoticesEmitted.has(key)) {
+    _tierFallbackNoticesEmitted.add(key);
+    process.stderr.write(
+      `[models] no Anthropic credential and no models.tier.${tier} set — using the configured chat_model ` +
+      `"${configuredChat}" for the ${tier} tier. Pin it explicitly with: ` +
+      `gbrain config set models.tier.${tier} <provider>:<model>\n`,
+    );
+  }
+  return configuredChat;
+}
+
 /**
  * v0.31.12 subagent runtime enforcement (layer 2).
  *
@@ -105,6 +172,24 @@ export function isAnthropicProvider(modelString: string): boolean {
 }
 
 const _subagentTierWarningsEmitted = new Set<string>();
+
+/**
+ * True when the resolved model runs on hardware the user already owns, so its
+ * marginal token cost is zero. Read from the recipe's declared chat pricing
+ * rather than an id allowlist, so a future local recipe is covered without
+ * editing this list.
+ */
+function isFreeLocalProvider(resolved: string): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mr = require('./ai/model-resolver.ts') as typeof import('./ai/model-resolver.ts');
+    const { recipe } = mr.resolveRecipe(resolved);
+    const chat = recipe.touchpoints.chat;
+    return chat?.cost_per_1m_input_usd === 0 && chat?.cost_per_1m_output_usd === 0;
+  } catch {
+    return false;
+  }
+}
 
 // Module-level set of deprecated config keys we've already warned about.
 // Reset on process restart; one warning per (key, process) per Codex P1 #11.
@@ -191,9 +276,16 @@ export async function resolveModel(
   }
 
   // 7. Tier default (v0.31.12 — when no override beats us, the tier's
-  //    canonical model wins over caller-supplied fallback)
+  //    canonical model wins over caller-supplied fallback). Routed through
+  //    resolveTierDefault so a brain with no Anthropic credential lands on
+  //    its configured chat_model instead of an unreachable anthropic:* id.
   if (opts.tier && TIER_DEFAULTS[opts.tier]) {
-    return await resolveAlias(engine, TIER_DEFAULTS[opts.tier]);
+    const tierDefault = resolveTierDefault(opts.tier);
+    const resolved = await resolveAlias(engine, tierDefault);
+    // Same capability gate the config-sourced branches get: a chat_model
+    // pointed at a tool-less model must not silently become the subagent
+    // driver just because it arrived via this path.
+    return enforceSubagentCapable(resolved, opts.tier, `chat_model (tier.${opts.tier} default)`);
   }
 
   // 8. Hardcoded fallback (caller-supplied)
@@ -269,10 +361,18 @@ function enforceSubagentCapable(resolved: string, tier: ModelTier | undefined, s
   if (verdict === 'degraded:no_caching') {
     if (!_subagentTierWarningsEmitted.has(key)) {
       _subagentTierWarningsEmitted.add(key);
+      // A free provider pays for the missing cache in latency, not dollars.
+      // Telling someone running Ollama that their loop is expensive — and
+      // that Anthropic would be cheaper — is simply wrong, and it is the
+      // message a deliberately-local brain would see on every process.
+      const free = isFreeLocalProvider(resolved);
       process.stderr.write(
         `[models] tier.subagent resolved to "${resolved}" via "${source}" — provider does not support prompt caching. ` +
-        `The loop will run hot (cost scales linearly with conversation length). ` +
-        `For lower cost on long loops, set models.tier.subagent to an Anthropic model.\n`,
+        (free
+          ? `The loop re-sends the whole conversation each turn, so long loops get progressively slower. ` +
+            `Raise the model's context window if turns start truncating.\n`
+          : `The loop will run hot (cost scales linearly with conversation length). ` +
+            `For lower cost on long loops, set models.tier.subagent to an Anthropic model.\n`),
       );
     }
   }

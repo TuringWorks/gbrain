@@ -1064,6 +1064,15 @@ async function initPGLite(opts: {
       printSubagentAnthropicCaveat((s) => process.stderr.write(s));
     }
 
+    // Local-fleet tier assignment. Same placement rationale as the mode picker
+    // below: after initSchema so config writes land. No-op unless chat_model is
+    // an Ollama one; fail-open when the daemon is down.
+    const { maybeAutotuneLocalTiers } = await import('./init-autotune.ts');
+    await maybeAutotuneLocalTiers(engine, {
+      chatModel: opts.aiOpts?.chat_model,
+      jsonOutput: opts.jsonOutput,
+    });
+
     // v0.32.3 search-lite install-time mode picker. Runs AFTER initSchema so
     // DB config writes are valid. Idempotent: skipped on re-init if already set.
     // Non-TTY auto-selects; --json emits a structured event.
@@ -1310,6 +1319,13 @@ async function initPostgres(opts: {
       const { printSubagentAnthropicCaveat } = await import('./init-provider-picker.ts');
       printSubagentAnthropicCaveat((s) => process.stderr.write(s));
     }
+
+    // Local-fleet tier assignment — same shape as the PGLite path above.
+    const { maybeAutotuneLocalTiers: autotunePostgres } = await import('./init-autotune.ts');
+    await autotunePostgres(engine, {
+      chatModel: opts.aiOpts?.chat_model,
+      jsonOutput: opts.jsonOutput,
+    });
 
     // v0.32.3 search-lite install-time mode picker. Same shape as the
     // PGLite path above — runs AFTER initSchema, idempotent on re-init.

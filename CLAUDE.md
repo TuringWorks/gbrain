@@ -115,6 +115,7 @@ detail on demand.)
 | any file in `src/` (what it does + its invariants) | `docs/architecture/KEY_FILES.md` — find the file's entry |
 | search / ranking / hybrid / retrieval | `docs/architecture/RETRIEVAL.md` + the `search/*` entries in `KEY_FILES.md` |
 | search modes / cost knobs | `docs/guides/search-modes.md` |
+| local / non-Anthropic models (ollama, llama-server, provider recipes) | `docs/guides/local-models.md` |
 | embedding spend gates / cost gate / `spend.posture` / off switches | `docs/operations/spend-controls.md` |
 | push-based context (volunteer/watch/reflex window) | `docs/guides/push-context.md` |
 | schema packs / page types / extraction | `docs/architecture/schema-packs.md`, `type-taxonomy.md`, `lens-packs.md` |

@@ -2,6 +2,42 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [Unreleased]
+
+**A brain can now run start to finish on local models, with no hosted API key anywhere.**
+
+gbrain has supported Ollama since v0.32, but only for embeddings. That meant a local install could index and search a brain and then hit a wall: every step that needed to *reason* — `gbrain think`, query expansion, `gbrain dream`, `gbrain agent run` — routed to Anthropic, because that was the only thing the model defaults knew how to name. It reported itself as a missing Anthropic key, which reads as "gbrain requires Anthropic" rather than "nothing told me what to use."
+
+Ollama and llama.cpp's `llama-server` now serve chat and query expansion as well as embeddings, with tool calling, so the subagent loop runs on them. The model defaults follow your configured chat model when there is no Anthropic credential, instead of naming a model you have no way to reach. The subagent loop routes non-Anthropic models through the provider-agnostic tool loop automatically — that loop has shipped since v0.38, but a config key stood between it and every brain that needed it. And a worker on a keyless brain now starts, where before it failed during startup regardless of which models its jobs targeted.
+
+Brains with an Anthropic key are unaffected: every default resolves exactly as it did.
+
+Remote Ollama and Ollama Cloud work through the same recipe via `OLLAMA_BASE_URL`. One thing worth knowing: Ollama model ids ending in `-cloud` or `:cloud` run on Ollama's servers even when your base URL points at the local daemon, because the daemon proxies them. The model id is the only thing that tells you, so it is worth reading before you pick one.
+
+Four hosted providers join the registry: xAI (Grok), Cerebras, Fireworks AI, and SambaNova. Fireworks serves embeddings as well as chat; the other three are chat-only and pair with an embedding provider.
+
+**`gbrain models autotune` gives each model tier a model sized for its job.** gbrain routes work through four tiers — classification, the default workhorse, expensive reasoning, and the tool loop. A keyless brain used to run all four on one model, which wastes a local fleet in both directions. autotune reads what you have pulled and assigns each tier, printing its reasoning and the context window it measured. It runs automatically during `gbrain init` when you pick an Ollama chat model, never overwrites a tier you set by hand, and is safe to re-run after pulling a model. Discovery happens once and writes config, so model resolution stays a pure config read with no network call in the path.
+
+### To take advantage of this release
+
+```bash
+gbrain upgrade
+```
+
+To move a brain onto local models:
+
+```bash
+ollama serve & ollama pull nomic-embed-text && ollama pull qwen3
+gbrain config set chat_model ollama:qwen3
+gbrain doctor
+```
+
+`gbrain doctor` now probes local endpoints directly — a stopped daemon is the failure mode no key check can catch. Read [docs/guides/local-models.md](docs/guides/local-models.md) first if you are doing this on a real brain; it covers the two settings most likely to bite you (context window and prompt caching) and what local costs you in retrieval quality.
+
+### For contributors
+
+`agent.use_gateway_loop` still exists and still means something — it opts *Anthropic* models into the gateway loop too. It is simply no longer what stands between a local model and a loop that already supported it. Cost estimates for Cerebras, Fireworks, and SambaNova report unknown rather than carrying a guessed rate, since none publishes a stable public per-token table; a fabricated rate corrupts a `--max-usd` gate silently, which is worse than an absent one.
+
 ## [0.42.74.0] - 2026-08-07
 
 **Two fixes for agents that reach a brain over the network: takes-holder visibility now works the way you set it, and the voice recipe is safe by default.**

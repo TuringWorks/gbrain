@@ -117,8 +117,8 @@ export function assertTouchpoint(
       `Provider "${recipe.id}" does not support touchpoint "${touchpoint}".`,
       touchpoint === 'embedding' && recipe.id === 'anthropic'
         ? 'Anthropic has no embedding model. Use openai or google for embeddings.'
-        : touchpoint === 'chat' && (recipe.id === 'voyage' || recipe.id === 'ollama')
-          ? `${recipe.name} is configured here only for embeddings. Use openai/anthropic/google/deepseek/groq/together for chat.`
+        : touchpoint === 'chat' && recipe.id === 'voyage'
+          ? `${recipe.name} is configured here only for embeddings. Use a chat-capable provider — ollama or llama-server to stay local, or openai/anthropic/google/deepseek/groq/together for hosted.`
           : undefined,
     );
   }

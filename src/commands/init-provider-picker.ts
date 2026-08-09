@@ -49,22 +49,38 @@ export interface PickProviderOpts {
 }
 
 /**
- * Surface the subagent-Anthropic caveat (D7) when the user picks a
- * non-Anthropic chat-capable recipe without `ANTHROPIC_API_KEY` set.
+ * Surface what running on a non-Anthropic chat model means, when the user
+ * picks one without `ANTHROPIC_API_KEY` set.
  *
- * Exported so `initPGLite` can reuse the same message in its post-init
- * stderr summary path (auto-pick branch doesn't run the picker but still
- * needs to surface the caveat). One source of truth keeps the message
- * format aligned across the three D7 surfaces (picker / init summary /
- * doctor).
+ * This used to say subagent features "require ANTHROPIC_API_KEY regardless of
+ * which chat model you pick". That is no longer true — the subagent handler
+ * auto-routes non-Anthropic models through the provider-agnostic gateway tool
+ * loop — and leaving it in place would tell a user who just deliberately chose
+ * a local model that their choice doesn't count.
+ *
+ * What IS still worth saying is the part that actually differs between the two
+ * loops: prompt caching. Anthropic's ephemeral cache markers are what keep a
+ * long multi-turn loop cheap; providers without them re-send the whole
+ * conversation every turn. On a local model that costs latency rather than
+ * money, which is a real trade-off but not a blocker.
+ *
+ * Exported so `initPGLite` can reuse the same message in its post-init stderr
+ * summary path (the auto-pick branch doesn't run the picker but still needs to
+ * surface this). One source of truth keeps the message aligned across the
+ * picker / init summary / doctor surfaces.
  */
 export function printSubagentAnthropicCaveat(write: (s: string) => void): void {
   write(
     '\n' +
     'Note: subagent features (gbrain dream, gbrain agent run, gbrain autopilot)\n' +
-    '      require ANTHROPIC_API_KEY regardless of which chat model you pick.\n' +
-    '      Chat alone (gbrain think, gbrain query expansion) works without it.\n' +
-    '      Set ANTHROPIC_API_KEY before running those commands.\n\n',
+    '      will run on this model via the provider-agnostic tool loop — no\n' +
+    '      ANTHROPIC_API_KEY needed. Two things to know:\n' +
+    '        - The model must support tool calling. Local models vary; small\n' +
+    '          ones tend to loop badly even when they advertise support.\n' +
+    '        - No prompt caching outside Anthropic, so each turn re-sends the\n' +
+    '          conversation. Long loops get slower (and, on hosted providers,\n' +
+    '          more expensive) than the same loop on Anthropic.\n' +
+    '      Run `gbrain doctor` to confirm the endpoint is reachable.\n\n',
   );
 }
 
