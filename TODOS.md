@@ -1,5 +1,29 @@
 # TODOS
 
+## local-model provider follow-ups (filed with the local/non-Anthropic wave)
+
+- [ ] **P2 — `ollama` / `llama-server` recipes hardcode `max_context_tokens: 4096`.**
+  That is the UN-TUNED daemon default, not what a configured daemon serves: a host
+  running `OLLAMA_CONTEXT_LENGTH=262144` gets budget math sized 64x too small, so
+  search payloads are trimmed far below what the model can actually take.
+  `gbrain models autotune` already measures the served length per model
+  (`observeServedContext` in `src/core/ai/local-discovery.ts`, reading `/api/ps` for
+  `min(trained, OLLAMA_CONTEXT_LENGTH)`), but that value is only reported — nothing
+  feeds it back into the recipe constant or into `search.token_budget`. Options:
+  persist the measured value to config at autotune time, or make
+  `capabilities.ts:maxContext` consult it. Keep the conservative 4096 as the
+  fallback when nothing has been measured — over-reporting causes silent
+  front-of-prompt truncation, which loses the retrieved context with no error.
+
+- [ ] **P3 — `.gbrainignore` is referenced in a comment but has no reader.**
+  `src/commands/import.ts:727` cites "#1483 .gbrainignore" in the sync-walker
+  comment, but the only exclusion mechanism implemented is `git ls-files
+  --exclude-standard` (i.e. `.gitignore`). That does not help for TRACKED files:
+  `--cached` lists them regardless, so there is currently no way to keep a
+  version-controlled directory (templates, fixtures, scaffolding) out of the brain
+  index. Either implement the reader or drop the reference so it stops reading as a
+  shipped feature.
+
 ## Fix-wave 1 follow-ups (upgrade-wedge + trust-seam wave, 2026-08)
 
 Deferred from the un-wedge-v121 hotfix wave (eng review + codex outside voice
